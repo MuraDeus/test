@@ -11,9 +11,8 @@ from typing import Any
 
 from config_manager import load_config
 
-SYSTEM_PROMPT = """You are an expert NovelAI V5 prompt engineer for manga/comic panels.
-Convert the user's situation description (Korean or English) into NovelAI V5 image tags.
-
+# 고정 기술 규칙 파트 — JSON 포맷, 예시 등 파싱에 필수적인 내용
+_TECHNICAL_RULES = """
 Rules:
 1. Extract ONLY scene/background, composition, camera angle, lighting, and character actions/poses.
 2. Do NOT include character appearance (hair, eye color, clothing) — those come from separate character presets.
@@ -33,6 +32,18 @@ Output: {"scene_prompt": "rainy alley, running, bird's eye view, rain drops, pud
 """
 
 
+def _build_system_prompt(cfg: dict[str, Any]) -> str:
+    """
+    config.json의 llm.base_prompt(사용자 설정) + 고정 기술 규칙을 결합하여
+    최종 System Prompt를 생성한다.
+    base_prompt가 비어 있으면 기술 규칙만 사용.
+    """
+    user_base = cfg["llm"].get("base_prompt", "").strip()
+    if user_base:
+        return user_base + "\n\n" + _TECHNICAL_RULES.strip()
+    return _TECHNICAL_RULES.strip()
+
+
 def _call_llm(situation: str, cfg: dict[str, Any]) -> str:
     llm_cfg = cfg["llm"]
     endpoint = llm_cfg["endpoint"].rstrip("/")
@@ -40,11 +51,13 @@ def _call_llm(situation: str, cfg: dict[str, Any]) -> str:
     model = llm_cfg["model"]
     temperature = float(llm_cfg.get("temperature", 0.7))
 
+    system_prompt = _build_system_prompt(cfg)
+
     payload = {
         "model": model,
         "temperature": temperature,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": situation}
         ]
     }
@@ -55,7 +68,12 @@ def _call_llm(situation: str, cfg: dict[str, Any]) -> str:
         data=data,
         headers={
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}"
+            "Authorization": f"Bearer {api_key}",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
         },
         method="POST"
     )

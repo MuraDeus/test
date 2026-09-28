@@ -5,6 +5,7 @@ Termux 환경에서 앱 재시작 후에도 데이터 보존
 """
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -14,12 +15,19 @@ PRESETS_FILE = BASE_DIR / "presets.json"
 CHARACTERS_FILE = BASE_DIR / "characters.json"
 OUTPUTS_DIR = BASE_DIR / "outputs"
 
+_DEFAULT_LLM_BASE_PROMPT = (
+    "You are an AI assistant that converts user story descriptions into NovelAI V5 prompts.\n"
+    "Convert background, composition, and actions into concise Danbooru-style English tags.\n"
+    "Always keep character features separated and return result in structured JSON."
+)
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "llm": {
         "endpoint": "https://api.openai.com/v1/chat/completions",
         "api_key": "",
         "model": "gpt-4o-mini",
-        "temperature": 0.7
+        "temperature": 0.7,
+        "base_prompt": _DEFAULT_LLM_BASE_PROMPT,
     },
     "nai": {
         "api_key": "",
@@ -186,6 +194,39 @@ def list_images_in_group(group_name: str) -> list[str]:
         str(p) for p in group_dir.iterdir()
         if p.suffix.lower() in exts
     )
+
+
+def delete_image_file(image_path: str) -> bool:
+    """단일 이미지 파일 삭제. 성공 여부 반환."""
+    p = Path(image_path)
+    if p.exists() and p.is_file():
+        p.unlink()
+        return True
+    return False
+
+
+def delete_group_dir(group_name: str) -> bool:
+    """그룹 폴더 전체(이미지 포함) 삭제. 성공 여부 반환."""
+    group_dir = OUTPUTS_DIR / group_name
+    if group_dir.exists() and group_dir.is_dir():
+        shutil.rmtree(group_dir)
+        return True
+    return False
+
+
+def rename_group_dir(old_name: str, new_name: str) -> tuple[bool, str]:
+    """
+    그룹 폴더 이름 변경.
+    Returns: (success: bool, error_message: str)
+    """
+    old_dir = OUTPUTS_DIR / old_name
+    new_dir = OUTPUTS_DIR / new_name
+    if not old_dir.exists():
+        return False, f"'{old_name}' 그룹이 존재하지 않습니다."
+    if new_dir.exists():
+        return False, f"'{new_name}'은 이미 존재하는 그룹명입니다."
+    old_dir.rename(new_dir)
+    return True, ""
 
 
 _ensure_dirs()

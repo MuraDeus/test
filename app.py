@@ -2,16 +2,23 @@
 app.py
 Gradio 기반 모바일 최적화 NAI V5 만화 생성기
 Galaxy S26 Ultra Termux 환경 최적화 (세로 레이아웃, 터치 친화적 UI)
+
+설계 원칙:
+- build_tab_generate()는 (style_preset_dd, char_cbg)를 반환하여
+  인물/그림체 관리 탭에서 탭1 컴포넌트를 직접 갱신 가능하게 함
+- 인물/그림체 탭: 새로 등록 / 수정 사항 반영 / 삭제 3버튼 CRUD
+- 갤러리 탭: 이미지 개별 삭제 + 그룹 이름 변경 / 전체 삭제
 """
 import gradio as gr
 from pathlib import Path
 
 from config_manager import (
     load_config, save_config,
-    load_presets, upsert_preset, delete_preset,
-    load_characters, upsert_character, delete_character,
+    load_presets, upsert_preset, delete_preset, get_preset_by_name,
+    load_characters, upsert_character, delete_character, get_character_by_name,
     list_output_groups, list_images_in_group,
-    DEFAULT_PRESET, BASE_DIR
+    delete_image_file, delete_group_dir, rename_group_dir,
+    BASE_DIR,
 )
 from llm_parser import parse_situation
 from nai_client import generate_image, VALID_SAMPLERS
@@ -31,24 +38,17 @@ def _group_choices() -> list[str]:
     return list_output_groups()
 
 
-# ── 탭 1: 만화 생성 ────────────────────────────────────────────────────────────
-
-def refresh_presets_dropdown():
-    return gr.update(choices=_preset_names())
-
-
-def refresh_chars_checkboxgroup():
-    return gr.update(choices=_char_names())
+def _safe_name(raw: str) -> str:
+    """파일시스템 안전 그룹명 (유니코드 알파뉴메릭 + -_공백 허용)"""
+    return "".join(c for c in raw.strip() if c.isalnum() or c in "-_ ")
 
 
-def refresh_groups_dropdown():
-    return gr.update(choices=_group_choices())
-
+# ── 탭 1: 만화 생성 ───────────────────────────────────────────────────────────
 
 def on_generate(
     situation, dialogue_enabled, dialogue_text,
-    style_preset_name, character_names,
-    group_name, progress=gr.Progress()
+    style_preset_name, character_names, group_name,
+    progress=gr.Progress()
 ):
     if not situation.strip():
         return None, "", "상황 설명을 입력해주세요."
@@ -59,19 +59,16 @@ def on_generate(
     except Exception as e:
         return None, "", f"LLM 오류: {e}"
 
-    scene_prompt = parsed["scene_prompt"]
-    scene_negative = parsed["negative_prompt"]
-
     progress(0.4, desc="NAI V5 이미지 생성 중...")
     img_path, prompt_display, error = generate_image(
         situation=situation,
-        scene_prompt=scene_prompt,
-        scene_negative=scene_negative,
+        scene_prompt=parsed["scene_prompt"],
+        scene_negative=parsed["negative_prompt"],
         style_preset_name=style_preset_name,
         character_names=character_names if character_names else [],
         dialogue_enabled=dialogue_enabled,
         dialogue_text=dialogue_text,
-        group_name=group_name
+        group_name=group_name,
     )
 
     progress(1.0, desc="완료")
@@ -81,45 +78,42 @@ def on_generate(
 
 
 def build_tab_generate():
+    """Returns (style_preset_dd, char_cbg) — 다른 탭에서 직접 갱신용."""
     with gr.Column():
         gr.Markdown("## 만화 컷 생성")
 
         situation_input = gr.Textbox(
             label="대본 / 상황 설명",
             placeholder="예: 비 오는 밤, 교실 창가에 홀로 앉아 창밖을 바라보는 장면. 우울한 분위기.",
-            lines=4
+            lines=4,
         )
 
-        with gr.Row():
-            dialogue_enabled = gr.Checkbox(label="대사 포함", value=False)
-
+        dialogue_enabled = gr.Checkbox(label="대사 포함", value=False)
         dialogue_text = gr.Textbox(
             label="대사 입력 (대사 포함 체크 시 적용)",
             placeholder="예: 오늘도 비가 오네...",
             lines=2,
-            visible=False
+            visible=False,
         )
         dialogue_enabled.change(
             fn=lambda v: gr.update(visible=v),
             inputs=dialogue_enabled,
-            outputs=dialogue_text
+            outputs=dialogue_text,
         )
 
         style_preset_dd = gr.Dropdown(
             label="그림체 프리셋",
             choices=_preset_names(),
-            value=_preset_names()[0] if _preset_names() else None
+            value=_preset_names()[0] if _preset_names() else None,
         )
-
         char_cbg = gr.CheckboxGroup(
             label="등장 인물 (다중 선택)",
-            choices=_char_names()
+            choices=_char_names(),
         )
-
         group_input = gr.Textbox(
             label="생성 그룹 (저장 폴더명)",
             placeholder="예: 작품A_1화",
-            value=""
+            value="",
         )
 
         with gr.Row():
@@ -129,55 +123,93 @@ def build_tab_generate():
         status_text = gr.Textbox(label="상태", interactive=False, lines=1)
         result_image = gr.Image(label="생성된 이미지", type="filepath", height=500)
         prompt_display = gr.Textbox(
-            label="최종 프롬프트 확인",
-            interactive=False,
-            lines=8
+            label="최종 프롬프트 확인", interactive=False, lines=8
         )
 
     refresh_btn.click(
         fn=lambda: (
             gr.update(choices=_preset_names()),
-            gr.update(choices=_char_names())
+            gr.update(choices=_char_names()),
         ),
-        outputs=[style_preset_dd, char_cbg]
+        outputs=[style_preset_dd, char_cbg],
     )
-
     generate_btn.click(
         fn=on_generate,
         inputs=[
             situation_input, dialogue_enabled, dialogue_text,
-            style_preset_dd, char_cbg, group_input
+            style_preset_dd, char_cbg, group_input,
         ],
-        outputs=[result_image, prompt_display, status_text]
+        outputs=[result_image, prompt_display, status_text],
     )
 
+    return style_preset_dd, char_cbg
 
-# ── 탭 2: 인물 프리셋 관리 ────────────────────────────────────────────────────
+
+# ── 탭 2: 인물 프리셋 관리 ───────────────────────────────────────────────────
 
 def on_char_select(name):
-    char = next((c for c in load_characters() if c["name"] == name), None)
+    """드롭다운 선택 → 폼 자동 채우기"""
+    if not name:
+        return "", "", ""
+    char = get_character_by_name(name)
     if char is None:
         return "", "", ""
     return char["name"], char.get("prompt", ""), char.get("negative_prompt", "")
 
 
-def on_char_save(name, prompt, negative_prompt):
-    if not name.strip():
-        return "인물 이름을 입력해주세요.", gr.update(), gr.update()
-    upsert_character({"name": name.strip(), "prompt": prompt.strip(), "negative_prompt": negative_prompt.strip()})
-    names = _char_names()
-    return f"'{name}' 저장 완료.", gr.update(choices=names, value=name.strip()), gr.update(choices=names)
-
-
-def on_char_delete(name):
+def on_char_new(name, prompt, negative_prompt):
+    """새 인물 등록 — 이미 존재하는 이름이면 오류"""
+    name = name.strip()
     if not name:
-        return "삭제할 인물을 선택해주세요.", gr.update(), gr.update()
-    delete_character(name)
+        return "인물 이름을 입력해주세요.", gr.update(), gr.update()
+    if get_character_by_name(name):
+        return (
+            f"'{name}'은 이미 존재합니다. "
+            "수정하려면 목록에서 선택 후 '수정 사항 반영'을 눌러주세요.",
+            gr.update(), gr.update(),
+        )
+    upsert_character({
+        "name": name,
+        "prompt": prompt.strip(),
+        "negative_prompt": negative_prompt.strip(),
+    })
     names = _char_names()
-    return f"'{name}' 삭제 완료.", gr.update(choices=names, value=None), gr.update(choices=names)
+    return f"'{name}' 새로 등록 완료.", gr.update(choices=names, value=name), gr.update(choices=names)
 
 
-def build_tab_characters():
+def on_char_update(selected_name, name, prompt, negative_prompt):
+    """선택된 인물 수정 (이름 변경도 가능)"""
+    if not selected_name:
+        return "수정할 인물을 목록에서 먼저 선택해주세요.", gr.update(), gr.update()
+    name = name.strip()
+    if not name:
+        return "인물 이름을 입력해주세요.", gr.update(), gr.update()
+    if selected_name != name and get_character_by_name(name):
+        return f"'{name}'은 이미 다른 인물로 등록되어 있습니다.", gr.update(), gr.update()
+    if selected_name != name:
+        delete_character(selected_name)
+    upsert_character({
+        "name": name,
+        "prompt": prompt.strip(),
+        "negative_prompt": negative_prompt.strip(),
+    })
+    names = _char_names()
+    return f"'{name}' 수정 완료.", gr.update(choices=names, value=name), gr.update(choices=names)
+
+
+def on_char_delete(selected_name):
+    """선택된 인물 삭제"""
+    if not selected_name:
+        return "삭제할 인물을 목록에서 선택해주세요.", gr.update(), gr.update()
+    delete_character(selected_name)
+    names = _char_names()
+    return f"'{selected_name}' 삭제 완료.", gr.update(choices=names, value=None), gr.update(choices=names)
+
+
+def build_tab_characters(char_cbg_ref: gr.CheckboxGroup):
+    """
+    char_cbg_ref: 탭1의 CheckboxGroup — 인물 추가/수정/삭제 시 함께 갱신
+    """
     with gr.Column():
         gr.Markdown("## 인물(Character) 프리셋 관리")
 
@@ -185,49 +217,74 @@ def build_tab_characters():
             label="저장된 인물 목록 (선택하여 편집)",
             choices=_char_names(),
             value=None,
-            allow_custom_value=False
+            allow_custom_value=False,
         )
 
         char_name = gr.Textbox(label="인물 이름", placeholder="예: 주인공_민수")
         char_prompt = gr.Textbox(
             label="외형 프롬프트 (Positive)",
             placeholder="예: 1boy, black hair, short hair, brown eyes, school uniform",
-            lines=4
+            lines=4,
         )
         char_neg = gr.Textbox(
             label="부정 프롬프트 (Undesired Content)",
             placeholder="예: glasses",
-            lines=2
+            lines=2,
         )
 
         with gr.Row():
-            char_save_btn = gr.Button("저장", variant="primary")
+            char_new_btn = gr.Button("새로 등록", variant="primary")
+            char_update_btn = gr.Button("수정 사항 반영", variant="secondary")
             char_del_btn = gr.Button("삭제", variant="stop")
 
+        char_clear_btn = gr.Button("폼 초기화 (새 입력 시작)", size="sm")
         char_status = gr.Textbox(label="상태", interactive=False, lines=1)
 
-    char_list.change(fn=on_char_select, inputs=char_list, outputs=[char_name, char_prompt, char_neg])
-    char_save_btn.click(
-        fn=on_char_save,
-        inputs=[char_name, char_prompt, char_neg],
-        outputs=[char_status, char_list, char_list]
+    # 드롭다운 선택 → 폼 자동 채우기
+    char_list.change(
+        fn=on_char_select,
+        inputs=char_list,
+        outputs=[char_name, char_prompt, char_neg],
     )
+    # 새로 등록
+    char_new_btn.click(
+        fn=on_char_new,
+        inputs=[char_name, char_prompt, char_neg],
+        outputs=[char_status, char_list, char_cbg_ref],
+    )
+    # 수정 사항 반영
+    char_update_btn.click(
+        fn=on_char_update,
+        inputs=[char_list, char_name, char_prompt, char_neg],
+        outputs=[char_status, char_list, char_cbg_ref],
+    )
+    # 삭제
     char_del_btn.click(
         fn=on_char_delete,
         inputs=char_list,
-        outputs=[char_status, char_list, char_list]
+        outputs=[char_status, char_list, char_cbg_ref],
+    )
+    # 폼 초기화
+    char_clear_btn.click(
+        fn=lambda: (gr.update(value=None), "", "", ""),
+        outputs=[char_list, char_name, char_prompt, char_neg],
     )
 
 
-# ── 탭 3: 그림체 프리셋 관리 ──────────────────────────────────────────────────
+# ── 탭 3: 그림체 프리셋 관리 ─────────────────────────────────────────────────
 
 SAMPLER_LIST = sorted(VALID_SAMPLERS)
 
+_STYLE_DEFAULTS = ("", "", "", "k_euler_ancestral", 28, 6.0, 832, 1216, "karras", 0.0, False)
+
 
 def on_style_select(name):
-    p = next((x for x in load_presets() if x["name"] == name), None)
+    """드롭다운 선택 → 모든 입력 필드 자동 채우기"""
+    if not name:
+        return _STYLE_DEFAULTS
+    p = get_preset_by_name(name)
     if p is None:
-        return ("", "", "", "k_euler_ancestral", 28, 6.0, 832, 1216, "karras", 0.0, False)
+        return _STYLE_DEFAULTS
     return (
         p["name"],
         p.get("positive_prompt", ""),
@@ -239,14 +296,12 @@ def on_style_select(name):
         p.get("height", 1216),
         p.get("noise_schedule", "karras"),
         p.get("cfg_rescale", 0.0),
-        p.get("smea", False)
+        p.get("smea", False),
     )
 
 
-def on_style_save(name, pos, neg, sampler, steps, scale, width, height, noise, cfg_rescale, smea):
-    if not name.strip():
-        return "프리셋 이름을 입력해주세요.", gr.update(), gr.update()
-    preset = {
+def _build_preset_dict(name, pos, neg, sampler, steps, scale, width, height, noise, cfg_rescale, smea):
+    return {
         "name": name.strip(),
         "positive_prompt": pos.strip(),
         "negative_prompt": neg.strip(),
@@ -257,149 +312,330 @@ def on_style_save(name, pos, neg, sampler, steps, scale, width, height, noise, c
         "height": int(height),
         "noise_schedule": noise,
         "cfg_rescale": float(cfg_rescale),
-        "smea": bool(smea)
+        "smea": bool(smea),
     }
-    upsert_preset(preset)
-    names = _preset_names()
-    return f"'{name}' 저장 완료.", gr.update(choices=names, value=name.strip()), gr.update(choices=names)
 
 
-def on_style_delete(name):
+def on_style_new(name, pos, neg, sampler, steps, scale, width, height, noise, cfg_rescale, smea):
+    """새 그림체 프리셋 등록"""
+    name = name.strip()
     if not name:
-        return "삭제할 프리셋을 선택해주세요.", gr.update(), gr.update()
-    delete_preset(name)
+        return "프리셋 이름을 입력해주세요.", gr.update(), gr.update()
+    if get_preset_by_name(name):
+        return (
+            f"'{name}'은 이미 존재합니다. "
+            "수정하려면 목록에서 선택 후 '수정 사항 반영'을 눌러주세요.",
+            gr.update(), gr.update(),
+        )
+    upsert_preset(_build_preset_dict(name, pos, neg, sampler, steps, scale, width, height, noise, cfg_rescale, smea))
     names = _preset_names()
-    return f"'{name}' 삭제 완료.", gr.update(choices=names, value=None), gr.update(choices=names)
+    return f"'{name}' 새로 등록 완료.", gr.update(choices=names, value=name), gr.update(choices=names)
 
 
-def build_tab_styles():
+def on_style_update(selected_name, name, pos, neg, sampler, steps, scale, width, height, noise, cfg_rescale, smea):
+    """선택된 그림체 프리셋 수정 (이름 변경도 가능)"""
+    if not selected_name:
+        return "수정할 프리셋을 목록에서 먼저 선택해주세요.", gr.update(), gr.update()
+    name = name.strip()
+    if not name:
+        return "프리셋 이름을 입력해주세요.", gr.update(), gr.update()
+    if selected_name != name and get_preset_by_name(name):
+        return f"'{name}'은 이미 다른 프리셋으로 등록되어 있습니다.", gr.update(), gr.update()
+    if selected_name != name:
+        delete_preset(selected_name)
+    upsert_preset(_build_preset_dict(name, pos, neg, sampler, steps, scale, width, height, noise, cfg_rescale, smea))
+    names = _preset_names()
+    return f"'{name}' 수정 완료.", gr.update(choices=names, value=name), gr.update(choices=names)
+
+
+def on_style_delete(selected_name):
+    """선택된 그림체 프리셋 삭제"""
+    if not selected_name:
+        return "삭제할 프리셋을 목록에서 선택해주세요.", gr.update(), gr.update()
+    delete_preset(selected_name)
+    names = _preset_names()
+    return f"'{selected_name}' 삭제 완료.", gr.update(choices=names, value=None), gr.update(choices=names)
+
+
+def build_tab_styles(style_dd_ref: gr.Dropdown):
+    """
+    style_dd_ref: 탭1의 그림체 Dropdown — 프리셋 추가/수정/삭제 시 함께 갱신
+    """
+    _STYLE_INPUTS: list  # forward ref for inner use
+
     with gr.Column():
         gr.Markdown("## NAI 그림체 프리셋 관리")
 
         style_list = gr.Dropdown(
             label="저장된 프리셋 목록 (선택하여 편집)",
             choices=_preset_names(),
-            value=None
+            value=None,
         )
 
         s_name = gr.Textbox(label="프리셋 이름", placeholder="예: 기본 애니")
-        s_pos = gr.Textbox(label="긍정 프롬프트", lines=4,
-                           placeholder="best quality, amazing quality, very aesthetic, absurdres")
-        s_neg = gr.Textbox(label="부정 프롬프트", lines=3,
-                           placeholder="lowres, bad quality, ...")
+        s_pos = gr.Textbox(
+            label="긍정 프롬프트", lines=4,
+            placeholder="best quality, amazing quality, very aesthetic, absurdres",
+        )
+        s_neg = gr.Textbox(
+            label="부정 프롬프트", lines=3,
+            placeholder="lowres, bad quality, ...",
+        )
 
         with gr.Row():
-            s_sampler = gr.Dropdown(label="Sampler", choices=SAMPLER_LIST, value="k_euler_ancestral")
+            s_sampler = gr.Dropdown(
+                label="Sampler", choices=SAMPLER_LIST, value="k_euler_ancestral"
+            )
             s_steps = gr.Slider(label="Steps", minimum=1, maximum=50, step=1, value=28)
 
         with gr.Row():
-            s_scale = gr.Slider(label="CFG Scale", minimum=1.0, maximum=10.0, step=0.5, value=6.0)
-            s_cfg_rescale = gr.Slider(label="CFG Rescale", minimum=0.0, maximum=1.0, step=0.01, value=0.0)
+            s_scale = gr.Slider(
+                label="CFG Scale", minimum=1.0, maximum=10.0, step=0.5, value=6.0
+            )
+            s_cfg_rescale = gr.Slider(
+                label="CFG Rescale", minimum=0.0, maximum=1.0, step=0.01, value=0.0
+            )
 
         with gr.Row():
             s_width = gr.Dropdown(
                 label="Width",
                 choices=[640, 832, 1024, 1216, 1536],
-                value=832
+                value=832,
             )
             s_height = gr.Dropdown(
                 label="Height",
                 choices=[640, 832, 1024, 1216, 1536],
-                value=1216
+                value=1216,
             )
 
         with gr.Row():
             s_noise = gr.Dropdown(
                 label="Noise Schedule",
                 choices=["karras", "exponential", "polyexponential", "native"],
-                value="karras"
+                value="karras",
             )
             s_smea = gr.Checkbox(label="SMEA", value=False)
 
         with gr.Row():
-            style_save_btn = gr.Button("저장", variant="primary")
+            style_new_btn = gr.Button("새로 등록", variant="primary")
+            style_update_btn = gr.Button("수정 사항 반영", variant="secondary")
             style_del_btn = gr.Button("삭제", variant="stop")
 
+        style_clear_btn = gr.Button("폼 초기화 (새 입력 시작)", size="sm")
         style_status = gr.Textbox(label="상태", interactive=False, lines=1)
 
-    style_list.change(
-        fn=on_style_select,
-        inputs=style_list,
-        outputs=[s_name, s_pos, s_neg, s_sampler, s_steps, s_scale,
-                 s_width, s_height, s_noise, s_cfg_rescale, s_smea]
+    _field_outputs = [s_name, s_pos, s_neg, s_sampler, s_steps, s_scale,
+                      s_width, s_height, s_noise, s_cfg_rescale, s_smea]
+    _field_inputs = [s_name, s_pos, s_neg, s_sampler, s_steps, s_scale,
+                     s_width, s_height, s_noise, s_cfg_rescale, s_smea]
+
+    style_list.change(fn=on_style_select, inputs=style_list, outputs=_field_outputs)
+
+    style_new_btn.click(
+        fn=on_style_new,
+        inputs=_field_inputs,
+        outputs=[style_status, style_list, style_dd_ref],
     )
-    style_save_btn.click(
-        fn=on_style_save,
-        inputs=[s_name, s_pos, s_neg, s_sampler, s_steps, s_scale,
-                s_width, s_height, s_noise, s_cfg_rescale, s_smea],
-        outputs=[style_status, style_list, style_list]
+    style_update_btn.click(
+        fn=on_style_update,
+        inputs=[style_list] + _field_inputs,
+        outputs=[style_status, style_list, style_dd_ref],
     )
     style_del_btn.click(
         fn=on_style_delete,
         inputs=style_list,
-        outputs=[style_status, style_list, style_list]
+        outputs=[style_status, style_list, style_dd_ref],
+    )
+    style_clear_btn.click(
+        fn=lambda: (gr.update(value=None),) + _STYLE_DEFAULTS,
+        outputs=[style_list] + _field_outputs,
     )
 
 
-# ── 탭 4: 갤러리 ──────────────────────────────────────────────────────────────
+# ── 탭 4: 갤러리 ─────────────────────────────────────────────────────────────
 
-def on_gallery_refresh(group_name):
+def on_group_change(group_name):
+    """그룹 선택 → 이미지 목록 갱신 및 상태 초기화"""
+    images = list_images_in_group(group_name) if group_name else []
+    return images, images, None, "(이미지를 클릭하여 선택)"
+
+
+def on_gallery_select(evt: gr.SelectData, images: list):
+    """갤러리 이미지 클릭 → 선택된 파일 경로 저장"""
+    if images and 0 <= evt.index < len(images):
+        path = images[evt.index]
+        return path, f"선택됨: {Path(path).name}"
+    return None, "선택 실패 (목록과 인덱스 불일치)"
+
+
+def on_delete_image(selected_path, group_name):
+    """선택된 이미지 파일 삭제 후 갤러리 갱신"""
+    if not selected_path:
+        return (
+            "갤러리에서 이미지를 먼저 클릭하여 선택해주세요.",
+            gr.update(), gr.update(), None, "(이미지를 클릭하여 선택)",
+        )
+    success = delete_image_file(selected_path)
+    if success:
+        images = list_images_in_group(group_name) if group_name else []
+        return "이미지 삭제 완료.", images, images, None, "(이미지를 클릭하여 선택)"
+    return (
+        "이미지 파일을 찾을 수 없습니다.",
+        gr.update(), gr.update(),
+        selected_path, f"선택됨: {Path(selected_path).name}",
+    )
+
+
+def on_rename_group(old_name, new_name):
+    """그룹 폴더 이름 변경"""
+    if not old_name:
+        return "그룹을 선택해주세요.", gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+    safe = _safe_name(new_name or "")
+    if not safe:
+        return (
+            "유효한 그룹명을 입력해주세요 (한글, 영문, 숫자, -, _, 공백 허용).",
+            gr.update(), gr.update(), gr.update(), gr.update(), gr.update(),
+        )
+    ok, msg = rename_group_dir(old_name, safe)
+    if ok:
+        groups = _group_choices()
+        images = list_images_in_group(safe)
+        return (
+            f"'{old_name}' → '{safe}' 이름 변경 완료.",
+            gr.update(choices=groups, value=safe),
+            images, images, None, "(이미지를 클릭하여 선택)",
+        )
+    return f"변경 실패: {msg}", gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+
+
+def on_delete_group(group_name):
+    """그룹 폴더 전체 삭제"""
     if not group_name:
-        return []
-    images = list_images_in_group(group_name)
-    return images
+        return "삭제할 그룹을 선택해주세요.", gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
+    ok = delete_group_dir(group_name)
+    if ok:
+        groups = _group_choices()
+        return (
+            f"'{group_name}' 그룹 전체 삭제 완료.",
+            gr.update(choices=groups, value=None),
+            [], [], None, "(이미지를 클릭하여 선택)",
+        )
+    return "그룹 삭제 실패.", gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
 
 
 def build_tab_gallery():
     with gr.Column():
         gr.Markdown("## 갤러리 / 그룹별 모아보기")
 
+        # ── 그룹 선택 ──────────────────────────────────────────────────
         with gr.Row():
             gallery_group_dd = gr.Dropdown(
                 label="그룹 선택",
                 choices=_group_choices(),
                 value=None,
-                allow_custom_value=False
+                allow_custom_value=False,
             )
-            gallery_refresh_btn = gr.Button("새로고침", size="sm")
+            gallery_refresh_btn = gr.Button("목록 새로고침", size="sm")
 
+        # ── 그룹 관리 (Accordion) ───────────────────────────────────────
+        with gr.Accordion("그룹 관리 (이름 변경 / 전체 삭제)", open=False):
+            gr.Markdown("*위에서 그룹을 먼저 선택한 후 아래 작업을 수행하세요.*")
+            with gr.Row():
+                new_group_name_input = gr.Textbox(
+                    label="새 그룹명",
+                    placeholder="변경할 이름 입력",
+                    scale=3,
+                )
+                rename_group_btn = gr.Button("그룹명 변경", size="sm", scale=1)
+            delete_group_btn = gr.Button(
+                "그룹 전체 삭제 (이미지 포함)", variant="stop"
+            )
+            group_status = gr.Textbox(label="그룹 관리 상태", interactive=False, lines=1)
+
+        # ── 이미지 상태 저장 ────────────────────────────────────────────
+        gallery_images_state = gr.State(value=[])
+        selected_img_path = gr.State(value=None)
+
+        # ── 갤러리 ──────────────────────────────────────────────────────
         gallery_output = gr.Gallery(
-            label="이미지 목록",
+            label="이미지 목록 (이미지를 클릭하여 선택)",
             columns=2,
             object_fit="contain",
-            height="auto"
+            height="auto",
         )
 
-    gallery_group_dd.change(fn=on_gallery_refresh, inputs=gallery_group_dd, outputs=gallery_output)
+        # ── 이미지 개별 삭제 ────────────────────────────────────────────
+        selected_info = gr.Textbox(
+            label="선택된 이미지",
+            interactive=False,
+            lines=1,
+            value="(이미지를 클릭하여 선택)",
+        )
+        with gr.Row():
+            delete_img_btn = gr.Button("선택 이미지 삭제", variant="stop")
+            img_status = gr.Textbox(label="삭제 상태", interactive=False, lines=1, scale=3)
+
+    # ── 이벤트 연결 ────────────────────────────────────────────────────
+    _gallery_state_outputs = [gallery_output, gallery_images_state, selected_img_path, selected_info]
+    _group_mgmt_outputs = [group_status, gallery_group_dd] + _gallery_state_outputs
+
+    gallery_group_dd.change(
+        fn=on_group_change,
+        inputs=gallery_group_dd,
+        outputs=_gallery_state_outputs,
+    )
     gallery_refresh_btn.click(
         fn=lambda: gr.update(choices=_group_choices()),
-        outputs=gallery_group_dd
+        outputs=gallery_group_dd,
+    )
+    gallery_output.select(
+        fn=on_gallery_select,
+        inputs=gallery_images_state,
+        outputs=[selected_img_path, selected_info],
+    )
+    delete_img_btn.click(
+        fn=on_delete_image,
+        inputs=[selected_img_path, gallery_group_dd],
+        outputs=[img_status] + _gallery_state_outputs,
+    )
+    rename_group_btn.click(
+        fn=on_rename_group,
+        inputs=[gallery_group_dd, new_group_name_input],
+        outputs=_group_mgmt_outputs,
+    )
+    delete_group_btn.click(
+        fn=on_delete_group,
+        inputs=gallery_group_dd,
+        outputs=_group_mgmt_outputs,
     )
 
 
 # ── 탭 5: 설정 ────────────────────────────────────────────────────────────────
 
-def load_settings_values():
+def _load_settings_values():
     cfg = load_config()
     return (
-        cfg["llm"]["endpoint"],
-        cfg["llm"]["api_key"],
-        cfg["llm"]["model"],
-        cfg["llm"]["temperature"],
-        cfg["nai"]["api_key"],
-        cfg["nai"]["model"]
+        cfg["llm"]["endpoint"],        # vals[0]
+        cfg["llm"]["api_key"],         # vals[1]
+        cfg["llm"]["model"],           # vals[2]
+        cfg["llm"]["temperature"],     # vals[3]
+        cfg["llm"].get("base_prompt", ""),  # vals[4]
+        cfg["nai"]["api_key"],         # vals[5]
+        cfg["nai"]["model"],           # vals[6]
     )
 
 
 def on_settings_save(
     llm_endpoint, llm_key, llm_model, llm_temp,
-    nai_key, nai_model
+    llm_base_prompt,
+    nai_key, nai_model,
 ):
     cfg = load_config()
     cfg["llm"]["endpoint"] = llm_endpoint.strip()
     cfg["llm"]["api_key"] = llm_key.strip()
     cfg["llm"]["model"] = llm_model.strip()
     cfg["llm"]["temperature"] = float(llm_temp)
+    cfg["llm"]["base_prompt"] = llm_base_prompt  # 줄바꿈 보존을 위해 strip 하지 않음
     cfg["nai"]["api_key"] = nai_key.strip()
     cfg["nai"]["model"] = nai_model.strip()
     save_config(cfg)
@@ -407,7 +643,7 @@ def on_settings_save(
 
 
 def build_tab_settings():
-    cfg_vals = load_settings_values()
+    vals = _load_settings_values()
 
     with gr.Column():
         gr.Markdown("## 모델 및 API 설정")
@@ -415,32 +651,36 @@ def build_tab_settings():
         gr.Markdown("### LLM 설정")
         llm_endpoint = gr.Textbox(
             label="LLM 엔드포인트 (OpenAI-compatible)",
-            value=cfg_vals[0],
-            placeholder="https://api.openai.com/v1/chat/completions"
+            value=vals[0],
+            placeholder="https://api.openai.com/v1/chat/completions",
         )
         llm_key = gr.Textbox(
-            label="LLM API Key",
-            value=cfg_vals[1],
-            type="password",
-            placeholder="sk-..."
+            label="LLM API Key", value=vals[1],
+            type="password", placeholder="sk-...",
         )
         llm_model = gr.Textbox(
-            label="LLM 모델명",
-            value=cfg_vals[2],
-            placeholder="gpt-4o-mini"
+            label="LLM 모델명", value=vals[2], placeholder="gpt-4o-mini"
         )
         llm_temp = gr.Slider(
-            label="Temperature",
-            minimum=0.0, maximum=2.0, step=0.05,
-            value=float(cfg_vals[3])
+            label="Temperature", minimum=0.0, maximum=2.0, step=0.05,
+            value=float(vals[3]),
+        )
+        llm_base_prompt = gr.Textbox(
+            label="LLM 베이스 프롬프트 (System Prompt 앞부분 — 역할·지시 정의)",
+            value=vals[4],
+            lines=5,
+            placeholder=(
+                "You are an AI assistant that converts user story descriptions into NovelAI V5 prompts.\n"
+                "Convert background, composition, and actions into concise Danbooru-style English tags.\n"
+                "Always keep character features separated and return result in structured JSON."
+            ),
+            info="비워두면 기본 기술 규칙만 사용됩니다. 저장 후 다음 생성부터 즉시 적용.",
         )
 
         gr.Markdown("### NAI 설정")
         nai_key = gr.Textbox(
-            label="NAI API Key",
-            value=cfg_vals[4],
-            type="password",
-            placeholder="pst-..."
+            label="NAI API Key", value=vals[5],
+            type="password", placeholder="pst-...",
         )
         nai_model = gr.Dropdown(
             label="NAI 기본 모델",
@@ -450,10 +690,10 @@ def build_tab_settings():
                 "nai-diffusion-4-5-full",
                 "nai-diffusion-4-5-curated",
                 "nai-diffusion-4-full",
-                "nai-diffusion-4-curated-preview"
+                "nai-diffusion-4-curated-preview",
             ],
-            value=cfg_vals[5],
-            allow_custom_value=True
+            value=vals[6],
+            allow_custom_value=True,
         )
 
         settings_save_btn = gr.Button("설정 저장", variant="primary")
@@ -461,8 +701,8 @@ def build_tab_settings():
 
     settings_save_btn.click(
         fn=on_settings_save,
-        inputs=[llm_endpoint, llm_key, llm_model, llm_temp, nai_key, nai_model],
-        outputs=settings_status
+        inputs=[llm_endpoint, llm_key, llm_model, llm_temp, llm_base_prompt, nai_key, nai_model],
+        outputs=settings_status,
     )
 
 
@@ -475,17 +715,21 @@ body, .gradio-container {
     padding: 8px !important;
     font-size: 15px;
 }
-.gr-button {
+button.gr-button, .gr-button {
     min-height: 44px !important;
     font-size: 15px !important;
 }
-.gr-textbox textarea, .gr-dropdown select {
+textarea, select, input[type="text"] {
     font-size: 15px !important;
 }
-/* 탭 버튼 크게 */
+/* 탭 버튼 터치 영역 확보 */
 .tab-nav button {
-    padding: 10px 8px !important;
+    padding: 10px 6px !important;
     font-size: 13px !important;
+}
+/* 3버튼 행 균등 분배 */
+.gr-row > button {
+    flex: 1 !important;
 }
 """
 
@@ -494,17 +738,19 @@ def build_app() -> gr.Blocks:
     with gr.Blocks(
         title="NAI V5 만화 생성기",
         theme=gr.themes.Soft(),
-        css=CUSTOM_CSS
+        css=CUSTOM_CSS,
     ) as app:
         gr.Markdown("# NAI V5 만화 생성기")
 
         with gr.Tabs():
             with gr.Tab("생성"):
-                build_tab_generate()
+                style_dd_ref, char_cbg_ref = build_tab_generate()
             with gr.Tab("인물"):
-                build_tab_characters()
+                # char_cbg_ref를 전달 → 인물 CRUD 시 탭1 체크박스 자동 갱신
+                build_tab_characters(char_cbg_ref)
             with gr.Tab("그림체"):
-                build_tab_styles()
+                # style_dd_ref를 전달 → 프리셋 CRUD 시 탭1 드롭다운 자동 갱신
+                build_tab_styles(style_dd_ref)
             with gr.Tab("갤러리"):
                 build_tab_gallery()
             with gr.Tab("설정"):
@@ -520,5 +766,5 @@ if __name__ == "__main__":
         server_port=7860,
         share=False,
         show_error=True,
-        quiet=False
+        quiet=False,
     )
