@@ -1,0 +1,18 @@
+# NAI V5 만화 생성기 - Termux (Python 3.11+) 설치 목록
+# 설치 명령: pip install -r requirements.txt
+
+# Web UI
+gradio>=4.44.0
+
+# HTTP (표준 라이브러리 urllib 사용 → 추가 패키지 불필요)
+# requests 는 선택 사항 (urllib로 대체됨)
+
+# 이미지 처리 (NAI ZIP 응답 파싱)
+# zipfile, io → 표준 라이브러리
+
+# Termux 주의사항:
+# 1. Pillow(PIL) 필요 시: pip install Pillow
+#    (Termux에서 libjpeg, libpng 선설치 필요)
+#    pkg install libjpeg-turbo libpng
+# 2. numpy 필요 시: pkg install python-numpy
+# 3. gradio 설치 전: pip install --upgrade pip setuptools wheel
