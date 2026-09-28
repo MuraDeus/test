@@ -28,6 +28,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "model": "gpt-4o-mini",
         "temperature": 0.7,
         "base_prompt": _DEFAULT_LLM_BASE_PROMPT,
+        "reasoning_effort": "none",
     },
     "nai": {
         "api_key": "",
@@ -227,6 +228,58 @@ def rename_group_dir(old_name: str, new_name: str) -> tuple[bool, str]:
         return False, f"'{new_name}'은 이미 존재하는 그룹명입니다."
     old_dir.rename(new_dir)
     return True, ""
+
+
+# ── Group Context (context.json) ──────────────────────────────────────────────
+
+_EMPTY_CONTEXT: dict[str, Any] = {
+    "summary": "",
+    "characters_state": {},
+    "history": [],
+}
+
+
+def load_group_context(group_name: str) -> dict[str, Any]:
+    """그룹 문맥 파일 로드. 없거나 손상 시 빈 구조 반환."""
+    if not group_name:
+        return dict(_EMPTY_CONTEXT)
+    context_file = OUTPUTS_DIR / group_name / "context.json"
+    if not context_file.exists():
+        return dict(_EMPTY_CONTEXT)
+    try:
+        with open(context_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        data.setdefault("summary", "")
+        data.setdefault("characters_state", {})
+        data.setdefault("history", [])
+        return data
+    except (json.JSONDecodeError, OSError):
+        return dict(_EMPTY_CONTEXT)
+
+
+def save_group_context(group_name: str, context: dict[str, Any]) -> None:
+    """그룹 문맥 파일 저장."""
+    group_dir = get_group_dir(group_name)
+    context_file = group_dir / "context.json"
+    with open(context_file, "w", encoding="utf-8") as f:
+        json.dump(context, f, ensure_ascii=False, indent=2)
+
+
+def append_cut_to_context(
+    group_name: str,
+    cut_entry: dict[str, Any],
+    updated_summary: str,
+    char_updates: dict[str, str],
+) -> None:
+    """새 컷 데이터를 문맥에 추가하고 저장. 최근 30컷만 유지."""
+    ctx = load_group_context(group_name)
+    ctx.setdefault("history", []).append(cut_entry)
+    ctx["history"] = ctx["history"][-30:]
+    if updated_summary:
+        ctx["summary"] = updated_summary
+    if char_updates and isinstance(char_updates, dict):
+        ctx.setdefault("characters_state", {}).update(char_updates)
+    save_group_context(group_name, ctx)
 
 
 _ensure_dirs()
